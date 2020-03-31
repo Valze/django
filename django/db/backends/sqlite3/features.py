@@ -9,6 +9,14 @@ from django.utils.functional import cached_property
 from .base import Database
 
 
+def supports_cloning():
+    if (int(platform.python_version().startswith('2') or
+            int(platform.python_version_tuple()[1]) < 7)) \
+            and platform.system() == 'Windows':
+        return False
+    return True
+
+
 class DatabaseFeatures(BaseDatabaseFeatures):
     # SQLite can read from a cursor since SQLite 3.6.5, subject to the caveat
     # that statements within a connection aren't isolated from each other. See
@@ -24,7 +32,7 @@ class DatabaseFeatures(BaseDatabaseFeatures):
     can_rollback_ddl = True
     can_create_inline_fk = False
     supports_paramstyle_pyformat = False
-    can_clone_databases = True
+    can_clone_databases = supports_cloning()
     supports_temporal_subtraction = True
     ignores_table_name_case = True
     supports_cast_with_precision = False

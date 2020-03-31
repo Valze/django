@@ -7,9 +7,13 @@ class SimpleModel(models.Model):
     manager = models.manager.Manager()
 
 
+class CheckModel(models.Model):
+    pass
+
+
 @register('tests')
 def my_check(app_configs, **kwargs):
-    my_check.did_run = True
+    CheckModel.objects.create()
     return []
 
 

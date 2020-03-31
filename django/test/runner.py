@@ -289,10 +289,6 @@ class RemoteTestRunner:
 
 def default_test_processes():
     """Default number of test processes when using the --parallel option."""
-    # The current implementation of the parallel test runner requires
-    # multiprocessing to start subprocesses with fork().
-    if multiprocessing.get_start_method() != 'fork':
-        return 1
     try:
         return int(os.environ['DJANGO_TEST_PROCESSES'])
     except KeyError:
@@ -302,7 +298,8 @@ def default_test_processes():
 _worker_id = 0
 
 
-def _init_worker(counter):
+def _init_worker(counter, process_setup=None, process_setup_args=None, initial_settings=None,
+                 serialized_contents=None):
     """
     Switch to databases dedicated to this worker.
 
@@ -316,15 +313,18 @@ def _init_worker(counter):
         counter.value += 1
         _worker_id = counter.value
 
+    if multiprocessing.get_start_method() == 'spawn':
+        process_setup(*process_setup_args)
+        setup_test_environment()
+
     for alias in connections:
         connection = connections[alias]
-        settings_dict = connection.creation.get_test_db_clone_settings(str(_worker_id))
-        # connection.settings_dict must be updated in place for changes to be
-        # reflected in django.db.connections. If the following line assigned
-        # connection.settings_dict = settings_dict, new threads would connect
-        # to the default database instead of the appropriate clone.
-        connection.settings_dict.update(settings_dict)
-        connection.close()
+        if multiprocessing.get_start_method() == 'spawn':
+            # Restore initial settings in spawned processes
+            connection.settings_dict.update(initial_settings[str(alias)])
+            if serialized_contents:
+                connection._test_serialized_contents = serialized_contents[str(alias)]
+        connection.creation.setup_worker_connection(_worker_id)
 
 
 def _run_subsuite(args):
@@ -361,10 +361,12 @@ class ParallelTestSuite(unittest.TestSuite):
     run_subsuite = _run_subsuite
     runner_class = RemoteTestRunner
 
-    def __init__(self, suite, processes, failfast=False):
-        self.subsuites = partition_suite_by_case(suite)
+    def __init__(self, subsuites, processes, process_setup=None, process_setup_args=None, failfast=False):
+        self.subsuites = subsuites
         self.processes = processes
         self.failfast = failfast
+        self.process_setup = process_setup
+        self.process_setup_args = process_setup_args
         super().__init__()
 
     def run(self, result):
@@ -386,7 +388,8 @@ class ParallelTestSuite(unittest.TestSuite):
         pool = multiprocessing.Pool(
             processes=self.processes,
             initializer=self.init_worker.__func__,
-            initargs=[counter],
+            initargs=[counter, self.process_setup, self.process_setup_args, self.initial_settings,
+                      self.serialized_contents],
         )
         args = [
             (self.runner_class, index, subsuite, self.failfast)
@@ -548,7 +551,7 @@ class DiscoverRunner:
         setup_test_environment(debug=self.debug_mode)
         unittest.installHandler()
 
-    def build_suite(self, test_labels=None, extra_tests=None, **kwargs):
+    def build_suite(self, test_labels=None, extra_tests=None, process_setup=None, process_setup_args=None, **kwargs):
         suite = self.test_suite()
         test_labels = test_labels or ['.']
         extra_tests = extra_tests or []
@@ -618,13 +621,12 @@ class DiscoverRunner:
         suite = reorder_suite(suite, self.reorder_by, self.reverse)
 
         if self.parallel > 1:
-            parallel_suite = self.parallel_test_suite(suite, self.parallel, self.failfast)
-
             # Since tests are distributed across processes on a per-TestCase
             # basis, there's no need for more processes than TestCases.
-            parallel_units = len(parallel_suite.subsuites)
-            self.parallel = min(self.parallel, parallel_units)
-
+            subsuites = partition_suite_by_case(suite)
+            self.parallel = min(self.parallel, len(subsuites))
+            parallel_suite = self.parallel_test_suite(subsuites, self.parallel, process_setup,
+                                                      process_setup_args, self.failfast)
             # If there's only one TestCase, parallelization isn't needed.
             if self.parallel > 1:
                 suite = parallel_suite
@@ -636,6 +638,24 @@ class DiscoverRunner:
             self.verbosity, self.interactive, time_keeper=self.time_keeper, keepdb=self.keepdb,
             debug_sql=self.debug_sql, parallel=self.parallel, **kwargs
         )
+
+    def parallel_setup(self, databases, suite):
+        if self.parallel > 1:
+            if multiprocessing.get_start_method() == 'spawn':
+                suite.initial_settings = {
+                    str(alias): connections[alias].settings_dict
+                    for alias in connections
+                }
+                try:
+                    suite.serialized_contents = {
+                        str(alias): connections[alias]._test_serialized_contents
+                        for alias in connections
+                    }
+                except AttributeError:
+                    suite.serialized_contents = None
+            else:
+                suite.initial_settings = None
+                suite.serialized_contents = None
 
     def get_resultclass(self):
         if self.debug_sql:
@@ -698,7 +718,7 @@ class DiscoverRunner:
                 print('Skipping setup of unused database(s): %s.' % ', '.join(sorted(unused_databases)))
         return databases
 
-    def run_tests(self, test_labels, extra_tests=None, **kwargs):
+    def run_tests(self, test_labels, extra_tests=None, process_setup=None, process_setup_args=None, **kwargs):
         """
         Run the unit tests for all the test labels in the provided list.
 
@@ -711,13 +731,14 @@ class DiscoverRunner:
         Return the number of tests that failed.
         """
         self.setup_test_environment()
-        suite = self.build_suite(test_labels, extra_tests)
+        suite = self.build_suite(test_labels, extra_tests, process_setup, process_setup_args)
         databases = self.get_databases(suite)
         with self.time_keeper.timed('Total database setup'):
             old_config = self.setup_databases(aliases=databases)
         run_failed = False
         try:
             self.run_checks(databases)
+            self.parallel_setup(old_config, suite)
             result = self.run_suite(suite)
         except Exception:
             run_failed = True

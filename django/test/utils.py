@@ -203,6 +203,17 @@ def setup_databases(verbosity, interactive, *, time_keeper, keepdb=False, debug_
     return old_names
 
 
+def clone_databases(old_config, verbosity, keepdb, parallel):
+    for connection, _, clone in old_config:
+        if clone:
+            for index in range(parallel):
+                connection.creation.clone_test_db(
+                    suffix=str(index + 1),
+                    verbosity=verbosity,
+                    keepdb=keepdb
+                )
+
+
 def dependency_ordered(test_databases, dependencies):
     """
     Reorder test_databases into an order that honors the dependencies
