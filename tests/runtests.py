@@ -290,6 +290,7 @@ def django_tests(verbosity, interactive, failfast, keepdb, reverse,
                  test_name_patterns, start_at, start_after, pdb, buffer,
                  timing):
     state = setup(verbosity, test_labels, parallel, start_at, start_after)
+    process_setup_args = (verbosity, test_labels, parallel, start_at, start_after)
     extra_tests = []
 
     # Run the test suite, including the extra validation tests.
@@ -315,6 +316,8 @@ def django_tests(verbosity, interactive, failfast, keepdb, reverse,
     failures = test_runner.run_tests(
         test_labels or get_installed(),
         extra_tests=extra_tests,
+        process_setup=setup,
+        process_setup_args=process_setup_args,
     )
     teardown(state)
     return failures

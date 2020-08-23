@@ -1,5 +1,7 @@
+import multiprocessing
 import os
 import shutil
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -80,6 +82,10 @@ class DatabaseCreation(BaseDatabaseCreation):
             except Exception as e:
                 self.log('Got an error cloning the test database: %s' % e)
                 sys.exit(2)
+        else:
+            if multiprocessing.get_start_method() == 'spawn' and int(suffix) < 2:
+                db = f'{str(self.connection.alias)}.sqlite3'
+                self.connection.connection.execute('VACUUM INTO ?', (db,))
 
     def _destroy_test_db(self, test_database_name, verbosity):
         if test_database_name and not self.is_in_memory_db(test_database_name):
@@ -101,3 +107,16 @@ class DatabaseCreation(BaseDatabaseCreation):
         else:
             sig.append(test_database_name)
         return tuple(sig)
+
+    def setup_worker_connection(self, _worker_id):
+        alias = self.connection.alias
+        worker_db = f'file:memorydb_{str(alias)}_{str(_worker_id)}?mode=memory&cache=shared'
+        sourcedb = sqlite3.connect(f'file:{str(alias)}.sqlite3', uri=True)
+        second_db = sqlite3.connect(worker_db, uri=True)
+        sourcedb.execute('VACUUM INTO ?', (worker_db,))
+        sourcedb.close()
+        settings_dict = self.connection.settings_dict
+        settings_dict['NAME'] = worker_db
+        self.connection.settings_dict.update(settings_dict)
+        self.connection.connect()
+        second_db.close()
